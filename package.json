@@ -12,7 +12,12 @@
     "jszip": "^3.10.1",
     "next": "^14.2.0",
     "react": "^18.2.0",
-    "react-dom": "^18.2.0"
+    "react-dom": "^18.2.0",
+    "@supabase/supabase-js": "^2.56.0",
+    "cheerio": "^1.0.0-rc.12",
+    "p-limit": "^6.2.0",
+    "xlsx": "^0.18.5",
+    "pdfkit": "^0.16.0"
   },
   "devDependencies": {
     "eslint": "^8.0.0",

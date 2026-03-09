@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
+import Link from "next/link";
 import JSZip from "jszip";
 
 // ─── CONSTANTS ───
@@ -23,9 +24,32 @@ function parseGoogleDriveUrl(url) {
   return null;
 }
 
+
+
+function isDirectImageUrl(url) {
+  // Basic image URL detection
+  try {
+    const u = new URL(url);
+    const path = u.pathname.toLowerCase();
+    return (
+      path.endsWith(".png") ||
+      path.endsWith(".jpg") ||
+      path.endsWith(".jpeg") ||
+      path.endsWith(".webp") ||
+      path.endsWith(".gif")
+    );
+  } catch {
+    return false;
+  }
+}
+
+function getDirectImageProxyUrl(url) {
+  return `/api/proxy?url=${encodeURIComponent(url)}`;
+}
 function getLinkType(url) {
   if (url.includes("scryfall.com/card/")) return "scryfall";
   if (url.includes("drive.google.com")) return "gdrive";
+  if (isDirectImageUrl(url)) return "direct";
   return "unknown";
 }
 
@@ -98,6 +122,56 @@ function buildGDriveCardData(url, fileId) {
   };
 }
 
+function buildDirectImageCardData(url) {
+  const proxied = getDirectImageProxyUrl(url);
+  const lower = url.toLowerCase();
+  const isPng = lower.includes(".png");
+  const ext = isPng ? "png" : "jpg";
+
+  // Try to make a readable name from the URL.
+  const base = (() => {
+    try {
+      const u = new URL(url);
+      const last = u.pathname.split("/").filter(Boolean).pop() || "image";
+      return last.replace(/\.[a-z0-9]+$/i, "").replace(/[-_]+/g, " ");
+    } catch {
+      return "image";
+    }
+  })();
+
+  return {
+    type: "direct",
+    name: base,
+    set_name: "Direct Image",
+    set: "img",
+    collector_number: "0",
+    image_normal: proxied,
+    image_large: proxied,
+    image_png: isPng ? proxied : null,
+    image_small: proxied,
+    scryfall_uri: url,
+    rarity: null,
+    direct_ext: ext,
+    original_link: url,
+  };
+}
+
+
+
+function formatMoney(value, currency = "PHP") {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return String(value ?? "");
+  try {
+    return new Intl.NumberFormat(undefined, {
+      style: "currency",
+      currency,
+      maximumFractionDigits: 2,
+    }).format(num);
+  } catch {
+    return `${currency} ${num.toFixed(2)}`;
+  }
+}
+
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
@@ -118,6 +192,10 @@ export default function PlaytestForge() {
     cardName: "",
   });
   const [toast, setToast] = useState(null);
+  const [dbQuery, setDbQuery] = useState("");
+  const [dbResults, setDbResults] = useState([]);
+  const [dbLoading, setDbLoading] = useState(false);
+
   const [mounted, setMounted] = useState(false);
   const [selectedCards, setSelectedCards] = useState(new Set());
   const toastTimeout = useRef(null);
@@ -155,6 +233,71 @@ export default function PlaytestForge() {
     if (toastTimeout.current) clearTimeout(toastTimeout.current);
     toastTimeout.current = setTimeout(() => setToast(null), 3000);
   }
+
+  async function searchDatabase(term) {
+    const t = (term || "").trim();
+    if (!t) {
+      setDbResults([]);
+      return;
+    }
+    setDbLoading(true);
+    try {
+      const resp = await fetch(`/api/cards/search?q=${encodeURIComponent(t)}&limit=10`, {
+        cache: "no-store",
+      });
+      const json = await resp.json();
+      if (json.ok) {
+        setDbResults(json.results || []);
+      }
+    } catch (e) {
+      console.error("DB search error", e);
+    } finally {
+      setDbLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    const handle = setTimeout(() => {
+      if (dbQuery.trim()) searchDatabase(dbQuery);
+      else setDbResults([]);
+    }, 350);
+    return () => clearTimeout(handle);
+  }, [dbQuery]);
+
+  function addDbCardToCustomer(dbCard) {
+    if (!activeCustomer || !dbCard) return;
+
+    const cardData = {
+      type: "db",
+      name: dbCard.name,
+      set_name: dbCard.set_name || dbCard.set_code || "",
+      set: (dbCard.set_code || "unk").toLowerCase(),
+      collector_number: dbCard.collector_number || "",
+      image_normal: dbCard.image_normal || null,
+      image_large: dbCard.image_normal || null,
+      image_png: dbCard.image_png || null,
+      image_small: dbCard.image_small || null,
+      scryfall_uri: dbCard.scryfall_uri || "",
+      rarity: null,
+    };
+
+    const newEntry = {
+      id: Date.now().toString() + Math.random().toString(36).slice(2),
+      ...cardData,
+      quantity: defaultQty,
+    };
+
+    const updated = customers.map((c) => {
+      if (c.id === activeCustomerId) {
+        return { ...c, cards: [...c.cards, newEntry] };
+      }
+      return c;
+    });
+
+    setCustomers(updated);
+    showToast(`${dbCard.name} added from database`);
+  }
+
 
   const activeCustomer = customers.find((c) => c.id === activeCustomerId);
 
@@ -237,6 +380,13 @@ export default function PlaytestForge() {
         } else {
           skipped++;
         }
+      } else if (linkType === "direct") {
+        const cardData = buildDirectImageCardData(url);
+        newCards.push({
+          id: Date.now().toString() + Math.random().toString(36).slice(2),
+          ...cardData,
+          quantity: defaultQty,
+        });
       } else {
         skipped++;
       }
@@ -439,8 +589,18 @@ export default function PlaytestForge() {
     <div className="app-container">
       {/* ─── HEADER ─── */}
       <header className="header">
-        <div className="logo-text">Playtest Cards</div>
-        <div className="logo-sub">MTG Card Image Downloader</div>
+        <div>
+          <div className="logo-text">Playtest Cards</div>
+          <div className="logo-sub">MTG Card Image Downloader</div>
+        </div>
+        <nav style={{ display: "flex", gap: 10, alignItems: "center" }}>
+          <Link href="/" style={{ textDecoration: "underline", fontSize: 13 }}>
+            Downloader
+          </Link>
+          <Link href="/database" style={{ textDecoration: "underline", fontSize: 13 }}>
+            Database
+          </Link>
+        </nav>
       </header>
 
       {/* ─── MAIN LAYOUT ─── */}
@@ -543,8 +703,111 @@ export default function PlaytestForge() {
                   <span style={{ color: "var(--accent-primary)" }}>
                     &#9432;
                   </span>
-                  One link per line. Supports Scryfall links and Google Drive image links.
+                  One link per line. Supports Scryfall links, Google Drive image links, and direct image URLs.
                 </div>
+
+              <div
+                style={{
+                  marginTop: 12,
+                  padding: 12,
+                  border: "1px solid #eee",
+                  borderRadius: 12,
+                }}
+              >
+                <div style={{ fontWeight: 700, marginBottom: 6 }}>
+                  Search Database
+                </div>
+                <div
+                  style={{
+                    display: "flex",
+                    gap: 8,
+                    alignItems: "center",
+                    flexWrap: "wrap",
+                  }}
+                >
+                  <input
+                    value={dbQuery}
+                    onChange={(e) => setDbQuery(e.target.value)}
+                    placeholder="Type a card name (e.g. Sol Ring)"
+                    style={{
+                      flex: 1,
+                      minWidth: 240,
+                      padding: 10,
+                      border: "1px solid #ddd",
+                      borderRadius: 10,
+                    }}
+                  />
+                  <button
+                    className="btn btn-secondary"
+                    onClick={() => searchDatabase(dbQuery)}
+                    disabled={dbLoading}
+                  >
+                    {dbLoading ? "Searching…" : "Search"}
+                  </button>
+                </div>
+                <div style={{ opacity: 0.75, fontSize: 12, marginTop: 6 }}>
+                  Add cards from your Supabase price database (no Scryfall link needed).
+                </div>
+
+                {dbResults.length > 0 && (
+                  <div style={{ marginTop: 10, display: "grid", gap: 8 }}>
+                    {dbResults.slice(0, 6).map((c) => {
+                      const cheapest = (c.listings || [])
+                        .slice()
+                        .sort((a, b) => (a.price ?? 0) - (b.price ?? 0))[0];
+                      return (
+                        <div
+                          key={c.id}
+                          style={{
+                            display: "flex",
+                            gap: 10,
+                            alignItems: "center",
+                            justifyContent: "space-between",
+                            border: "1px solid #eee",
+                            borderRadius: 10,
+                            padding: 10,
+                          }}
+                        >
+                          <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                            {c.image_small ? (
+                              <img
+                                src={c.image_small}
+                                alt={c.name}
+                                style={{ width: 34, borderRadius: 6 }}
+                                loading="lazy"
+                              />
+                            ) : (
+                              <div
+                                style={{
+                                  width: 34,
+                                  height: 26,
+                                  background: "#eee",
+                                  borderRadius: 6,
+                                }}
+                              />
+                            )}
+                            <div>
+                              <div style={{ fontWeight: 700 }}>{c.name}</div>
+                              <div style={{ opacity: 0.75, fontSize: 12 }}>
+                                {(c.set_code || "").toUpperCase()} #{c.collector_number || ""}
+                                {cheapest
+                                  ? ` • Cheapest: ${formatMoney(cheapest.price, cheapest.currency)} (${cheapest.stores?.slug || ""})`
+                                  : ""}
+                              </div>
+                            </div>
+                          </div>
+                          <button
+                            className="btn btn-primary"
+                            onClick={() => addDbCardToCustomer(c)}
+                          >
+                            Add
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
               </div>
 
               {/* CARD LIST */}
@@ -605,6 +868,12 @@ export default function PlaytestForge() {
                           )}
                           {card.type === "gdrive" && (
                             <span className="card-source-badge gdrive">DRIVE</span>
+                          )}
+                          {card.type === "direct" && (
+                            <span className="card-source-badge" style={{ marginLeft: 6 }}>IMG</span>
+                          )}
+                          {card.type === "db" && (
+                            <span className="card-source-badge" style={{ marginLeft: 6 }}>DB</span>
                           )}
                         </div>
                         <a
