@@ -1,8 +1,8 @@
 {
   "crons": [
     {
-      "path": "/api/scrape/run?token=REPLACE_WITH_YOUR_SCRAPE_ADMIN_TOKEN",
-      "schedule": "0 */12 * * *"
+      "path": "/api/scrape/run",
+      "schedule": "0 8 * * *"
     }
   ]
 }
