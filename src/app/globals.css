@@ -25,7 +25,12 @@
   box-sizing: border-box;
 }
 
+html, body {
+  min-height: 100%;
+}
+
 body {
+  position: relative;
   background: var(--bg-void);
   color: var(--text-primary);
   font-family: "Rajdhani", sans-serif;
@@ -38,21 +43,18 @@ body::before {
   content: "";
   position: fixed;
   inset: 0;
-  background: linear-gradient(rgba(108, 60, 255, 0.03) 1px, transparent 1px),
+  background:
+    linear-gradient(rgba(108, 60, 255, 0.03) 1px, transparent 1px),
     linear-gradient(90deg, rgba(108, 60, 255, 0.03) 1px, transparent 1px);
   background-size: 60px 60px;
-  z-index: 0;
+  z-index: -1;
+  pointer-events: none;
   animation: gridPulse 8s ease-in-out infinite;
 }
 
 @keyframes gridPulse {
-  0%,
-  100% {
-    opacity: 0.4;
-  }
-  50% {
-    opacity: 1;
-  }
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 1; }
 }
 
 /* Floating orb */
@@ -65,21 +67,18 @@ body::after {
   background: radial-gradient(circle, rgba(108, 60, 255, 0.08) 0%, transparent 70%);
   top: -200px;
   right: -200px;
-  z-index: 0;
+  z-index: -1;
+  pointer-events: none;
   animation: orbFloat 12s ease-in-out infinite;
 }
 
 @keyframes orbFloat {
-  0%,
-  100% {
-    transform: translate(0, 0);
-  }
-  50% {
-    transform: translate(-40px, 40px);
-  }
+  0%, 100% { transform: translate(0, 0); }
+  50% { transform: translate(-40px, 40px); }
 }
 
-#__next {
+/* App content should always sit above decorative layers */
+body > * {
   position: relative;
   z-index: 1;
 }
@@ -88,13 +87,16 @@ body::after {
 ::-webkit-scrollbar {
   width: 6px;
 }
+
 ::-webkit-scrollbar-track {
   background: var(--bg-void);
 }
+
 ::-webkit-scrollbar-thumb {
   background: var(--border-dim);
   border-radius: 3px;
 }
+
 ::-webkit-scrollbar-thumb:hover {
   background: var(--accent-primary);
 }
