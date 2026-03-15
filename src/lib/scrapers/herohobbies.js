@@ -1,92 +1,230 @@
-import {
-  fetchWithRetry,
-  normalizeWhitespace,
-} from "./utils";
+import { fetchWithRetry, normalizeWhitespace } from "./utils";
 
 const BASE = "https://herohobbies.ph";
 
 function sleep(ms) {
-  return new Promise(r => setTimeout(r, ms));
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function parseProductsFromInertia(html) {
-  const match = html.match(/<script[^>]*>window\.__INITIAL_STATE__\s*=\s*(\{.*?\})<\/script>/s)
-    || html.match(/"component":"Products","props":(\{.*\})/s);
+function extractInertiaJson(html) {
+  if (!html) return null;
 
-  if (!match) return [];
+  const patterns = [
+    /<div[^>]+id=["']app["'][^>]+data-page=["']([^"]+)["']/s,
+    /data-page="([^"]+)"/s,
+    /"component":"Products","props":(\{.*\})/s,
+  ];
 
-  try {
-    const jsonText = match[1];
-    const data = JSON.parse(jsonText);
+  for (const pattern of patterns) {
+    const match = html.match(pattern);
+    if (!match) continue;
 
-    const products = data.products?.data || data.products || [];
+    try {
+      let raw = match[1];
 
-    return products.map(p => ({
-      name: normalizeWhitespace(p.name),
-      price: Number(p.price) || null,
-      url: `${BASE}/products/view/${p.id}`,
-      setName: p.expansion || null
-    }));
+      // If pulled from data-page="", decode common HTML entities
+      raw = raw
+        .replace(/&quot;/g, '"')
+        .replace(/&#34;/g, '"')
+        .replace(/&amp;/g, "&")
+        .replace(/&#x27;/g, "'")
+        .replace(/&#39;/g, "'")
+        .replace(/&lt;/g, "<")
+        .replace(/&gt;/g, ">");
 
-  } catch {
-    return [];
+      // Pattern 3 only captures props, so wrap it
+      if (raw.startsWith("{") && !raw.includes('"component"')) {
+        return { props: JSON.parse(raw) };
+      }
+
+      return JSON.parse(raw);
+    } catch {
+      // try next pattern
+    }
   }
+
+  return null;
+}
+
+function toListing(product, sourceUrl) {
+  const id = product?.id;
+  const name = normalizeWhitespace(product?.name || product?.original_name || "");
+  const expansion = normalizeWhitespace(product?.expansion || "");
+  const collectorNumber = product?.card_number
+    ? String(product.card_number).trim()
+    : null;
+
+  const price =
+    product?.price != null && !Number.isNaN(Number(product.price))
+      ? Number(product.price)
+      : null;
+
+  if (!id || !name || price == null) return null;
+
+  return {
+    storeSlug: "herohobbies",
+    sourceUrl,
+    productUrl: `${BASE}/products/view/${id}`,
+    name,
+    setCode: null,
+    setName: expansion || null,
+    collectorNumber,
+    condition: null,
+    language: null,
+    price,
+    currency: "PHP",
+    stockQty:
+      product?.quantity != null && !Number.isNaN(Number(product.quantity))
+        ? Number(product.quantity)
+        : null,
+    inStock: Number(product?.quantity || 0) > 0,
+    imageUrl: product?.image_path || null,
+    scryfallId: product?.scryfall_id || null,
+    raw: {
+      category: product?.category || null,
+      variation: product?.variation || null,
+      rarity: product?.rarity || null,
+      type: product?.type || null,
+    },
+  };
+}
+
+function extractProductsFromHtml(html) {
+  const page = extractInertiaJson(html);
+  if (!page?.props) {
+    return {
+      products: [],
+      lastPage: 1,
+    };
+  }
+
+  const datas = page.props.datas || {};
+  const rows = Array.isArray(datas.data) ? datas.data : [];
+  const lastPage =
+    datas.last_page != null && !Number.isNaN(Number(datas.last_page))
+      ? Number(datas.last_page)
+      : 1;
+
+  return {
+    products: rows,
+    lastPage,
+  };
 }
 
 export async function scrapeHeroHobbies({
   startPage = 1,
-  endPage = 5,
-  delayMs = 700
+  endPage = null,
+  maxPages = 10,
+  delayMs = 700,
 } = {}) {
+  const firstUrl = `${BASE}/products/singles`;
 
-  const listings = [];
+  const firstResp = await fetchWithRetry(
+    firstUrl,
+    {
+      headers: {
+        "user-agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      },
+    },
+    { retries: 4 }
+  );
 
-  for (let page = startPage; page <= endPage; page++) {
+  if (!firstResp.ok) {
+    return {
+      ok: false,
+      storeSlug: "herohobbies",
+      listings: [],
+      message: `Failed to fetch Hero Hobbies singles page: ${firstResp.status}`,
+      meta: {},
+    };
+  }
 
+  const firstHtml = await firstResp.text();
+  const firstParsed = extractProductsFromHtml(firstHtml);
+  const discoveredLastPage = firstParsed.lastPage || 1;
+
+  const safeStart = Math.max(1, Number(startPage) || 1);
+  const safeEnd = Math.max(
+    safeStart,
+    endPage == null
+      ? Math.min(discoveredLastPage, safeStart + Math.max(1, maxPages) - 1)
+      : Math.min(discoveredLastPage, Number(endPage) || safeStart)
+  );
+
+  const allListings = [];
+  const failedPages = [];
+  const seen = new Set();
+
+  for (let page = safeStart; page <= safeEnd; page++) {
     const url =
       page === 1
         ? `${BASE}/products/singles`
         : `${BASE}/products/singles?page=${page}`;
 
-    const resp = await fetchWithRetry(url, {
-      headers: {
-        "user-agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+    try {
+      let html;
+
+      if (page === 1) {
+        html = firstHtml;
+      } else {
+        const resp = await fetchWithRetry(
+          url,
+          {
+            headers: {
+              "user-agent":
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+              accept:
+                "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            },
+          },
+          { retries: 4 }
+        );
+
+        if (!resp.ok) {
+          failedPages.push({ page, status: resp.status });
+          continue;
+        }
+
+        html = await resp.text();
       }
-    });
 
-    if (!resp.ok) continue;
+      const parsed = extractProductsFromHtml(html);
+      const rows = parsed.products || [];
 
-    const html = await resp.text();
+      for (const product of rows) {
+        const listing = toListing(product, url);
+        if (!listing) continue;
 
-    const products = parseProductsFromInertia(html);
+        const dedupeKey = `${listing.productUrl}__${listing.price}`;
+        if (seen.has(dedupeKey)) continue;
+        seen.add(dedupeKey);
 
-    for (const p of products) {
-      if (!p.price) continue;
+        allListings.push(listing);
+      }
 
-      listings.push({
-        storeSlug: "herohobbies",
-        productUrl: p.url,
-        sourceUrl: url,
-        name: p.name,
-        setName: p.setName,
-        setCode: null,
-        collectorNumber: null,
-        price: p.price,
-        currency: "PHP",
-        inStock: true
+      if (page < safeEnd) {
+        await sleep(delayMs);
+      }
+    } catch (error) {
+      failedPages.push({
+        page,
+        error: error?.message || String(error),
       });
-    }
-
-    if (page < endPage) {
-      await sleep(delayMs);
     }
   }
 
   return {
     ok: true,
     storeSlug: "herohobbies",
-    listings,
-    message: `Scraped ${listings.length} Hero Hobbies products from pages ${startPage}-${endPage}`
+    listings: allListings,
+    message: `Scraped ${allListings.length} Hero Hobbies products from pages ${safeStart}-${safeEnd} of ~${discoveredLastPage}`,
+    meta: {
+      startPage: safeStart,
+      endPage: safeEnd,
+      discoveredLastPage,
+      failedPages,
+    },
   };
 }
