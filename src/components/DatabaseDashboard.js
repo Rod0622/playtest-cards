@@ -10,6 +10,15 @@ function fmtMoney(v) {
   })}`;
 }
 
+async function readJsonSafe(resp) {
+  const text = await resp.text();
+  try {
+    return { json: JSON.parse(text), raw: text };
+  } catch {
+    return { json: null, raw: text };
+  }
+}
+
 export default function DatabaseDashboard() {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState([]);
@@ -20,8 +29,8 @@ export default function DatabaseDashboard() {
   const [scraping, setScraping] = useState(false);
 
   const [heroStartPage, setHeroStartPage] = useState(1);
-  const [heroEndPage, setHeroEndPage] = useState(10);
-  const [heroDelayMs, setHeroDelayMs] = useState(700);
+  const [heroEndPage, setHeroEndPage] = useState(2);
+  const [heroDelayMs, setHeroDelayMs] = useState(400);
 
   useEffect(() => {
     const saved = window.localStorage.getItem("SCRAPE_ADMIN_TOKEN") || "";
@@ -40,10 +49,14 @@ export default function DatabaseDashboard() {
       const resp = await fetch(
         `/api/cards/search?q=${encodeURIComponent(query || "")}`
       );
-      const json = await resp.json();
-      if (!resp.ok || !json.ok) {
-        throw new Error(json.error || "Search failed");
+      const { json, raw } = await readJsonSafe(resp);
+
+      if (!resp.ok || !json?.ok) {
+        throw new Error(
+          json?.error || raw || `Search failed with status ${resp.status}`
+        );
       }
+
       setResults(json.results || []);
       setSelected(null);
     } catch (e) {
@@ -56,10 +69,14 @@ export default function DatabaseDashboard() {
   async function refreshStatus() {
     try {
       const resp = await fetch("/api/scrape/status");
-      const json = await resp.json();
-      if (!resp.ok || !json.ok) {
-        throw new Error(json.error || "Failed to fetch scrape status");
+      const { json, raw } = await readJsonSafe(resp);
+
+      if (!resp.ok || !json?.ok) {
+        throw new Error(
+          json?.error || raw || `Failed to fetch scrape status (${resp.status})`
+        );
       }
+
       setStatusRows(json.runs || []);
     } catch (e) {
       console.error(e);
@@ -90,9 +107,12 @@ export default function DatabaseDashboard() {
         }),
       });
 
-      const json = await resp.json();
-      if (!resp.ok || !json.ok) {
-        throw new Error(json.error || "Scrape failed");
+      const { json, raw } = await readJsonSafe(resp);
+
+      if (!resp.ok || !json?.ok) {
+        throw new Error(
+          json?.error || raw || `Scrape failed with status ${resp.status}`
+        );
       }
 
       alert("Scrape finished. Check status panel for details.");
@@ -120,7 +140,7 @@ export default function DatabaseDashboard() {
       const text = await resp.text();
       await navigator.clipboard.writeText(text);
       alert("CSV copied. Paste it into Google Sheets.");
-    } catch (e) {
+    } catch {
       alert("Copy failed");
     }
   }
@@ -343,7 +363,7 @@ export default function DatabaseDashboard() {
                   min="0"
                   step="100"
                   value={heroDelayMs}
-                  onChange={(e) => setHeroDelayMs(Number(e.target.value || 700))}
+                  onChange={(e) => setHeroDelayMs(Number(e.target.value || 400))}
                   style={{
                     width: "100%",
                     padding: "8px 10px",
@@ -469,7 +489,8 @@ export default function DatabaseDashboard() {
                   <div>
                     <div style={{ fontSize: 24, fontWeight: 800 }}>{selected.name}</div>
                     <div style={{ opacity: 0.8 }}>
-                      {selected.set_name || "—"} {selected.collector_number ? `#${selected.collector_number}` : ""}
+                      {selected.set_name || "—"}{" "}
+                      {selected.collector_number ? `#${selected.collector_number}` : ""}
                     </div>
                     <div style={{ opacity: 0.8 }}>
                       Set code: {selected.set_code || "—"}
