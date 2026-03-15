@@ -339,6 +339,8 @@ export default function PlaytestForge() {
       return;
     }
 
+    const duplicateCount = lines.length - new Set(lines).size;
+
     setLoading(true);
     setProgress({ current: 0, total: lines.length, cardName: "" });
     setLoadingMsg("Fetching card data...");
@@ -403,7 +405,8 @@ export default function PlaytestForge() {
     setLinkInput("");
     setLoading(false);
     const skippedText = skipped > 0 ? " (" + skipped + " skipped)" : "";
-    const msg = newCards.length + " card" + (newCards.length !== 1 ? "s" : "") + " added" + skippedText;
+    const duplicateText = duplicateCount > 0 ? " • " + duplicateCount + " duplicate link" + (duplicateCount !== 1 ? "s" : "") + " will be renamed in ZIP" : "";
+    const msg = newCards.length + " card" + (newCards.length !== 1 ? "s" : "") + " added" + skippedText + duplicateText;
     showToast(msg, newCards.length === 0);
   }
 
@@ -502,41 +505,79 @@ export default function PlaytestForge() {
         activeCustomer.name.replace(/[^a-zA-Z0-9]/g, "_")
       );
 
+      const usedFileNames = new Set();
+      const failedCards = [];
+
+      function getUniqueFileName(baseName, ext) {
+        let candidate = `${baseName}.${ext}`;
+        let suffix = 1;
+
+        while (usedFileNames.has(candidate)) {
+          candidate = `${baseName} (${suffix}).${ext}`;
+          suffix++;
+        }
+
+        usedFileNames.add(candidate);
+        return candidate;
+      }
+
       let count = 0;
       for (const card of cards) {
         let imageUrl;
-        let ext = "jpg";
+        let preferredExt = "jpg";
 
         if (card.type === "gdrive" && card.gdrive_file_id) {
-          // Use direct download URL for Google Drive
           imageUrl = getGDriveImageUrl(card.gdrive_file_id);
-          ext = "png";
+          preferredExt = "png";
+        } else if (card.type === "direct") {
+          imageUrl = card.image_large || card.image_normal || card.image_small;
+          preferredExt = card.direct_ext || (card.image_png ? "png" : "jpg");
         } else {
           imageUrl = card.image_png || card.image_large || card.image_normal;
-          ext = card.image_png ? "png" : "jpg";
+          preferredExt = card.image_png ? "png" : "jpg";
         }
 
-        if (!imageUrl) continue;
+        if (!imageUrl) {
+          failedCards.push(card.name);
+          continue;
+        }
 
         setProgress({
-          current: count + 1,
+          current: Math.min(count + 1, totalImages),
           total: totalImages,
           cardName: card.name,
         });
 
         try {
           const resp = await fetch(imageUrl);
+          if (!resp.ok) {
+            throw new Error(`HTTP ${resp.status}`);
+          }
+
           const blob = await resp.blob();
-          const ext = card.image_png ? "png" : "jpg";
-          const safeName = card.name
+          const contentType = blob.type || "";
+          let ext = preferredExt;
+
+          if (!card.type || card.type !== "direct") {
+            if (contentType.includes("png")) ext = "png";
+            else if (contentType.includes("jpeg") || contentType.includes("jpg")) ext = "jpg";
+            else if (contentType.includes("webp")) ext = "webp";
+            else if (contentType.includes("gif")) ext = "gif";
+          }
+
+          const safeName = (card.name || "card")
             .replace(/[^a-zA-Z0-9 ]/g, "")
-            .replace(/\s+/g, "_");
+            .replace(/\s+/g, "_") || "card";
+          const safeSet = (card.set || "set").replace(/[^a-zA-Z0-9_-]/g, "_");
+          const safeCollector = String(card.collector_number || "0").replace(/[^a-zA-Z0-9_-]/g, "_");
 
           for (let q = 0; q < card.quantity; q++) {
-            const fileName =
+            const baseName =
               card.quantity > 1
-                ? `${safeName}_${card.set}_${card.collector_number}_copy${q + 1}.${ext}`
-                : `${safeName}_${card.set}_${card.collector_number}.${ext}`;
+                ? `${safeName}_${safeSet}_${safeCollector}_copy${q + 1}`
+                : `${safeName}_${safeSet}_${safeCollector}`;
+
+            const fileName = getUniqueFileName(baseName, ext);
             folder.file(fileName, blob);
             count++;
             setProgress({
@@ -547,6 +588,7 @@ export default function PlaytestForge() {
           }
         } catch (err) {
           console.error(`Failed to download ${card.name}:`, err);
+          failedCards.push(card.name);
           count += card.quantity;
         }
 
@@ -564,7 +606,11 @@ export default function PlaytestForge() {
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
 
-      showToast(`Downloaded ${count} card images!`);
+      if (failedCards.length > 0) {
+        showToast(`Downloaded ZIP with ${failedCards.length} failed card${failedCards.length !== 1 ? "s" : ""}. Check console for details.`, true);
+      } else {
+        showToast(`Downloaded ${count} card image${count !== 1 ? "s" : ""}! Duplicate names were auto-renamed like (1).`);
+      }
     } catch (err) {
       console.error("Download error:", err);
       showToast("Download failed: " + err.message, true);
