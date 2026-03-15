@@ -5,6 +5,13 @@ import {
   pickScryfallImages,
 } from "./mtg";
 
+function normalizeCardName(name) {
+  return String(name || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ");
+}
+
 /**
  * Ensure stores exist in DB.
  */
@@ -40,16 +47,19 @@ export async function ensureStores(service) {
 }
 
 async function findCard(service, { name, setCode, collectorNumber }) {
-  // best-effort match
+  const normalized = normalizeCardName(name);
+
   let q = service.from("cards").select("*");
+
   if (setCode && collectorNumber) {
     q = q
-      .ilike("name", name)
+      .eq("normalized_name", normalized)
       .eq("set_code", String(setCode).toLowerCase())
       .eq("collector_number", String(collectorNumber));
   } else {
-    q = q.ilike("name", name);
+    q = q.eq("normalized_name", normalized);
   }
+
   const { data } = await q.limit(1);
   return data?.[0] || null;
 }
@@ -57,6 +67,8 @@ async function findCard(service, { name, setCode, collectorNumber }) {
 export async function ensureCard(service, { name, setCode, collectorNumber }) {
   const cleanName = String(name || "").trim();
   if (!cleanName) return null;
+
+  const normalizedName = normalizeCardName(cleanName);
 
   const existing = await findCard(service, {
     name: cleanName,
@@ -78,6 +90,7 @@ export async function ensureCard(service, { name, setCode, collectorNumber }) {
 
   const payload = {
     name: cleanName,
+    normalized_name: normalizedName,
     set_code: (imgs.set_code || setCode || null)?.toLowerCase?.() || null,
     set_name: imgs.set_name || null,
     collector_number: imgs.collector_number || collectorNumber || null,
@@ -98,17 +111,20 @@ export async function ensureCard(service, { name, setCode, collectorNumber }) {
   return data;
 }
 
-export async function upsertListing(service, {
-  storeId,
-  cardId,
-  productUrl,
-  price,
-  currency = "PHP",
-  condition = null,
-  language = null,
-  inStock = true,
-  stockQty = null,
-}) {
+export async function upsertListing(
+  service,
+  {
+    storeId,
+    cardId,
+    productUrl,
+    price,
+    currency = "PHP",
+    condition = null,
+    language = null,
+    inStock = true,
+    stockQty = null,
+  }
+) {
   const now = new Date().toISOString();
   const payload = {
     store_id: storeId,
@@ -132,7 +148,6 @@ export async function upsertListing(service, {
 
   if (error) throw error;
 
-  // Always record price history when we scrape (cheap audit trail).
   await service.from("price_history").insert({
     listing_id: data.id,
     price: data.price,
@@ -150,7 +165,6 @@ export async function runScrapeAndSync({
 }) {
   const service = createServiceSupabase();
 
-  // create scrape run row
   const startedAt = new Date().toISOString();
   const runInsert = await service
     .from("scrape_runs")
@@ -189,12 +203,12 @@ export async function runScrapeAndSync({
       };
     }
 
-    // Cache for cards to avoid repeated DB queries.
     const cardCache = new Map();
 
     let inserted = 0;
     for (const row of scrapeResult.listings || []) {
-      const key = `${(row.setCode || "").toLowerCase()}__${row.collectorNumber || ""}__${row.name}`;
+      const key = `${(row.setCode || "").toLowerCase()}__${row.collectorNumber || ""}__${normalizeCardName(row.name)}`;
+
       let card = cardCache.get(key);
       if (!card) {
         card = await ensureCard(service, {
@@ -207,7 +221,7 @@ export async function runScrapeAndSync({
 
       if (!card) continue;
       if (!row.productUrl) continue;
-      if (row.price == null) continue; // only keep priced listings
+      if (row.price == null) continue;
 
       await upsertListing(service, {
         storeId,
