@@ -1,71 +1,93 @@
 import { NextResponse } from "next/server";
-import { scrapeAllStores, scrapeStore } from "@/lib/scrapers";
+import { scrapeStores } from "@/lib/scrapers";
 import { runScrapeAndSync } from "@/lib/db/sync";
 
 export const runtime = "nodejs";
+export const maxDuration = 300;
 
-function requireAdmin(request) {
-  const expected = process.env.SCRAPE_ADMIN_TOKEN;
-  if (!expected) {
-    throw new Error(
-      "Missing SCRAPE_ADMIN_TOKEN env var (set this in Vercel + .env.local)"
-    );
+function getAdminTokenFromRequest(request) {
+  const headerToken =
+    request.headers.get("x-admin-token") ||
+    request.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ||
+    "";
+
+  const url = new URL(request.url);
+  const queryToken = url.searchParams.get("token") || "";
+
+  return headerToken || queryToken;
+}
+
+function normalizeStores(stores) {
+  if (!Array.isArray(stores) || stores.length === 0) {
+    return ["contemporarynook", "herohobbies", "highmarket"];
   }
 
-  // 1) Header (preferred)
-  const headerToken = request.headers.get("x-admin-token");
-  if (headerToken && headerToken === expected) return true;
-
-  // 2) Query param (useful for Vercel Cron jobs)
-  try {
-    const { searchParams } = new URL(request.url);
-    const qp = searchParams.get("token");
-    if (qp && qp === expected) return true;
-  } catch {
-    // ignore
-  }
-
-  return false;
+  const allowed = new Set(["contemporarynook", "herohobbies", "highmarket"]);
+  return stores.filter((s) => allowed.has(String(s).toLowerCase()));
 }
 
 export async function POST(request) {
   try {
-    if (!requireAdmin(request)) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    const expectedToken = process.env.SCRAPE_ADMIN_TOKEN;
+    if (!expectedToken) {
+      return NextResponse.json(
+        { ok: false, error: "Missing env var: SCRAPE_ADMIN_TOKEN" },
+        { status: 500 }
+      );
     }
 
-    const body = await request.json().catch(() => ({}));
-    const stores = Array.isArray(body.stores) ? body.stores : null;
+    const providedToken = getAdminTokenFromRequest(request);
+    if (!providedToken || providedToken !== expectedToken) {
+      return NextResponse.json(
+        { ok: false, error: "Unauthorized" },
+        { status: 401 }
+      );
+    }
+
+    let body = {};
+    try {
+      body = await request.json();
+    } catch {
+      body = {};
+    }
+
+    const stores = normalizeStores(body.stores);
+    if (!stores.length) {
+      return NextResponse.json(
+        { ok: false, error: "No valid stores requested" },
+        { status: 400 }
+      );
+    }
+
     const optionsByStore = body.optionsByStore || {};
 
-    const results = [];
+    const scrapeResults = await scrapeStores(stores, optionsByStore);
 
-    // Run sequentially to be polite to the target sites.
-    const slugs = stores && stores.length ? stores : ["contemporarynook", "herohobbies", "highmarket"];
-
-    for (const slug of slugs) {
-      const scrapeResult = await scrapeStore(slug, optionsByStore?.[slug] || {});
-      const sync = await runScrapeAndSync({
-        storeSlug: slug,
-        scrapeResult,
-        runMeta: { options: optionsByStore?.[slug] || {} },
-      });
-      results.push({
-        store: slug,
-        scrape: {
-          ok: scrapeResult.ok,
-          message: scrapeResult.message,
-          rows: scrapeResult.listings?.length || 0,
+    const synced = [];
+    for (const result of scrapeResults) {
+      const syncResult = await runScrapeAndSync({
+        storeSlug: result.storeSlug,
+        scrapeResult: result,
+        runMeta: {
+          options: optionsByStore[result.storeSlug] || {},
         },
-        sync,
       });
+      synced.push(syncResult);
     }
 
-    return NextResponse.json({ ok: true, results });
-  } catch (e) {
-    console.error("/api/scrape/run error", e);
+    const ok = synced.every((r) => r.ok);
+
+    return NextResponse.json({
+      ok,
+      results: synced,
+    });
+  } catch (error) {
+    console.error("/api/scrape/run error", error);
     return NextResponse.json(
-      { ok: false, error: e?.message || String(e) },
+      {
+        ok: false,
+        error: error?.message || "Unknown scrape error",
+      },
       { status: 500 }
     );
   }
