@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { createBrowserSupabase } from "@/lib/supabase/server";
+import { createServiceSupabase } from "@/lib/supabase/server";
 
 export async function GET(request) {
   try {
@@ -8,7 +8,7 @@ export async function GET(request) {
     const limitParam = Number(searchParams.get("limit") || "200");
     const limit = Math.min(Math.max(limitParam, 1), 1000);
 
-    const supabase = createBrowserSupabase();
+    const supabase = createServiceSupabase();
 
     let query = supabase
       .from("cards")
@@ -89,6 +89,7 @@ export async function GET(request) {
     }
 
     const listingsByCard = new Map();
+
     for (const listing of listings) {
       const arr = listingsByCard.get(listing.card_id) || [];
       arr.push({
@@ -108,9 +109,11 @@ export async function GET(request) {
 
     const results = (cards || []).map((card) => {
       const cardListings = listingsByCard.get(card.id) || [];
-      const cheapest = cardListings.length
-        ? Math.min(...cardListings.map((l) => Number(l.price)).filter((v) => !Number.isNaN(v)))
-        : null;
+      const numericPrices = cardListings
+        .map((l) => Number(l.price))
+        .filter((v) => !Number.isNaN(v));
+
+      const cheapest = numericPrices.length ? Math.min(...numericPrices) : null;
 
       return {
         ...card,
