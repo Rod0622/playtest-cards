@@ -13,55 +13,46 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function isProbablyProductUrl(url) {
+function looksLikeProductUrl(url) {
   if (!url) return false;
   if (!url.startsWith(BASE)) return false;
   if (url.includes("/products/singles")) return false;
-  if (url.includes("/products/?")) return false;
-  if (url.includes("/collections/")) return false;
-  return url.includes("/products/");
+  return /\/products\/[^/?#]+/.test(url);
 }
 
 function parseTitleBits(title) {
   const clean = normalizeWhitespace(title);
 
-  // Example patterns seen on Hero Hobbies:
-  // "Mox Diamond #138 Stronghold Artifact (R)"
-  // "Rhystic Study (0091 - Anime Confetti Foil) #091 Wilds Of Eldraine Enchanting Tales Enchantment (M)"
-  // "Ancient Copper Dragon (0012 - Dragon of Mount Gulg) #012 Final Fantasy Through the Ages ..."
   const collectorMatch = clean.match(/#\s*([0-9A-Za-z-]+)/);
   const collectorNumber = collectorMatch ? collectorMatch[1] : null;
 
   let name = clean;
   let setName = null;
 
-  if (collectorMatch) {
-    const idx = collectorMatch.index ?? -1;
-    if (idx >= 0) {
-      name = normalizeWhitespace(clean.slice(0, idx));
-      const after = normalizeWhitespace(clean.slice(idx + collectorMatch[0].length));
+  if (collectorMatch && collectorMatch.index != null) {
+    const idx = collectorMatch.index;
+    name = normalizeWhitespace(clean.slice(0, idx));
+    const after = normalizeWhitespace(clean.slice(idx + collectorMatch[0].length));
 
-      // Heuristic: take text after # as set-ish text until card-type-ish words start
-      const stopWords = [
-        "Creature",
-        "Instant",
-        "Sorcery",
-        "Artifact",
-        "Enchantment",
-        "Land",
-        "Planeswalker",
-        "Battle",
-        "Kindred",
-        "Legendary",
-      ];
+    const stopWords = [
+      "Creature",
+      "Instant",
+      "Sorcery",
+      "Artifact",
+      "Enchantment",
+      "Land",
+      "Planeswalker",
+      "Battle",
+      "Kindred",
+      "Legendary",
+    ];
 
-      let cut = after.length;
-      for (const w of stopWords) {
-        const pos = after.indexOf(` ${w}`);
-        if (pos !== -1) cut = Math.min(cut, pos);
-      }
-      setName = normalizeWhitespace(after.slice(0, cut)) || null;
+    let cut = after.length;
+    for (const word of stopWords) {
+      const pos = after.indexOf(` ${word}`);
+      if (pos !== -1) cut = Math.min(cut, pos);
     }
+    setName = normalizeWhitespace(after.slice(0, cut)) || null;
   }
 
   return {
@@ -73,7 +64,6 @@ function parseTitleBits(title) {
 
 function extractPaginationLastPage(html) {
   const $ = cheerio.load(html);
-
   let last = 1;
 
   $("a[href]").each((_, a) => {
@@ -83,9 +73,7 @@ function extractPaginationLastPage(html) {
       if (u.pathname !== "/products/singles") return;
       const p = Number(u.searchParams.get("page"));
       if (Number.isFinite(p) && p > last) last = p;
-    } catch {
-      // ignore bad href
-    }
+    } catch {}
   });
 
   const bodyText = normalizeWhitespace($("body").text());
@@ -105,19 +93,19 @@ function extractListingsFromSinglesPage(html, pageUrl) {
   $("a[href]").each((_, a) => {
     const href = $(a).attr("href") || "";
     const productUrl = safeUrlJoin(BASE, href);
-    if (!isProbablyProductUrl(productUrl)) return;
+    if (!looksLikeProductUrl(productUrl)) return;
 
     const text = normalizeWhitespace($(a).text());
-    const container = $(a).closest("article, li, div").first();
+    const container = $(a).closest("article, li, div, section").first();
     const blob = normalizeWhitespace(container.text() || text);
 
-    const title = text || blob;
-    if (!title) return;
+    const combined = normalizeWhitespace(`${text} ${blob}`.trim());
+    if (!combined) return;
 
-    const price = parsePhpPrice(blob);
+    const price = parsePhpPrice(combined);
     if (price == null) return;
 
-    const bits = parseTitleBits(title);
+    const bits = parseTitleBits(text || blob);
 
     const key = `${productUrl}__${price}`;
     if (seen.has(key)) return;
@@ -146,10 +134,19 @@ function extractListingsFromSinglesPage(html, pageUrl) {
 export async function scrapeHeroHobbies({
   startPage = 1,
   endPage = null,
-  maxPages = 20,
+  maxPages = 10,
   delayMs = 700,
 } = {}) {
-  const firstResp = await fetchWithRetry(SINGLES_URL, {}, { retries: 4 });
+  const firstResp = await fetchWithRetry(
+    SINGLES_URL,
+    {
+      headers: {
+        "user-agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+      },
+    },
+    { retries: 4 }
+  );
 
   if (!firstResp.ok) {
     return {
@@ -182,7 +179,16 @@ export async function scrapeHeroHobbies({
       const resp =
         page === 1
           ? { ok: true, text: async () => firstHtml }
-          : await fetchWithRetry(url, {}, { retries: 4 });
+          : await fetchWithRetry(
+              url,
+              {
+                headers: {
+                  "user-agent":
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                },
+              },
+              { retries: 4 }
+            );
 
       if (!resp.ok) {
         failedPages.push({ page, status: resp.status });
