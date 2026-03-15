@@ -4,88 +4,69 @@ import {
   normalizeWhitespace,
   parsePhpPrice,
   safeUrlJoin,
-  uniq,
 } from "./utils";
 
 const BASE = "https://herohobbies.ph";
 
-function extractExpansionNames(html) {
-  // Heuristic: look for product-search links
-  const expansions = [];
-  const re = /product-search\/\?expansion=([^"&]+)/gi;
-  let m;
-  while ((m = re.exec(html))) {
-    try {
-      const decoded = decodeURIComponent(m[1].replace(/\+/g, "%20"));
-      if (decoded) expansions.push(decoded);
-    } catch {
-      // ignore
-    }
-  }
-  return uniq(expansions);
+function looksLikeMtgProductUrl(href) {
+  return /\/product\//i.test(href || "") || /\/mtg\//i.test(href || "");
 }
 
-function extractPaginationLastPage(html) {
-  const text = normalizeWhitespace(cheerio.load(html)("body").text());
-  const m = text.match(/Page\s*\d+\s*of\s*(\d+)/i);
-  if (m) return Number(m[1]);
+function parseCardText(text) {
+  const blob = normalizeWhitespace(text);
 
-  // fallback: detect max "page=" in links
-  const re = /[?&]page=(\d+)/gi;
-  let last = 1;
-  let mm;
-  while ((mm = re.exec(html))) {
-    last = Math.max(last, Number(mm[1]));
+  let condition = null;
+  let language = null;
+  const condLang = blob.match(
+    /\b(NM|LP|MP|HP|DMG|Near Mint|Lightly Played|Moderately Played|Heavily Played|Damaged)\b\s*(?:\(([^\)]+)\))?/i
+  );
+  if (condLang) {
+    condition = condLang[1];
+    language = condLang[2] || null;
   }
-  return last;
+
+  let stockQty = null;
+  const qty = blob.match(/(?:Available|Quantity|Stock)\s*:?\s*(\d+)/i);
+  if (qty) stockQty = Number(qty[1]);
+
+  return { blob, condition, language, stockQty };
 }
 
-function extractListingsFromSearchPage(html) {
+function inferTitleFromContainer($, a) {
+  const title = normalizeWhitespace($(a).text());
+  if (title && !/^view$/i.test(title)) return title;
+
+  const container = $(a).closest("li, article, div, section").first();
+  const heading = normalizeWhitespace(container.find("h1,h2,h3,h4,.woocommerce-loop-product__title,.product-title").first().text());
+  return heading || title || null;
+}
+
+function extractListingsFromShopPage(html, url) {
   const $ = cheerio.load(html);
   const listings = [];
+  const seen = new Set();
 
-  // Collect candidate product links
-  const links = $("a")
-    .map((_, a) => {
-      const href = $(a).attr("href") || "";
-      const txt = normalizeWhitespace($(a).text());
-      return { href, txt };
-    })
-    .get()
-    .filter((x) => x.href.includes("/mtg/") && x.txt && x.txt.length >= 2);
+  $("a[href]").each((_, el) => {
+    const href = $(el).attr("href") || "";
+    if (!looksLikeMtgProductUrl(href)) return;
 
-  const byHref = new Map();
-  for (const l of links) {
-    const abs = safeUrlJoin(BASE, l.href);
-    if (!abs) continue;
-    if (!byHref.has(abs)) byHref.set(abs, l.txt);
-  }
+    const productUrl = safeUrlJoin(BASE, href);
+    if (!productUrl || seen.has(productUrl)) return;
 
-  for (const [productUrl, nameGuess] of byHref.entries()) {
-    // Find an element that contains this link and look around for a PHP price.
-    const a = $("a").filter((_, el) => safeUrlJoin(BASE, $(el).attr("href") || "") === productUrl).first();
-    const container = a.closest("li, div, article").first();
-    const blob = normalizeWhitespace(container.text());
+    const name = inferTitleFromContainer($, el);
+    if (!name || name.length < 2) return;
+
+    const container = $(el).closest("li, article, div, section").first();
+    const { blob, condition, language, stockQty } = parseCardText(container.text());
     const price = parsePhpPrice(blob);
 
-    // Try to infer expansion / set code and collector number if present in text.
-    // HeroHobbies pages are inconsistent; we store name + price + url at minimum.
-    let condition = null;
-    let language = null;
-    const condLang = blob.match(/\b(NM|LP|MP|HP|DMG|Near Mint|Lightly Played|Moderately Played|Heavily Played|Damaged)\b\s*(?:\(([^\)]+)\))?/i);
-    if (condLang) {
-      condition = condLang[1];
-      language = condLang[2] || null;
-    }
+    if (price == null) return;
 
-    let stockQty = null;
-    const qty = blob.match(/Quantity\s*:\s*(\d+)/i);
-    if (qty) stockQty = Number(qty[1]);
-
+    seen.add(productUrl);
     listings.push({
       storeSlug: "herohobbies",
       productUrl,
-      name: nameGuess,
+      name,
       setCode: null,
       collectorNumber: null,
       condition,
@@ -94,69 +75,49 @@ function extractListingsFromSearchPage(html) {
       currency: "PHP",
       stockQty,
       inStock: stockQty == null ? true : stockQty > 0,
-      sourceUrl: productUrl,
+      sourceUrl: url,
     });
-  }
+  });
 
-  // De-dupe
-  const key = (x) => `${x.productUrl}__${x.price ?? ""}`;
-  const out = [];
-  const seen = new Set();
-  for (const x of listings) {
-    const k = key(x);
-    if (seen.has(k)) continue;
-    seen.add(k);
-    out.push(x);
-  }
-  return out;
+  return listings;
 }
 
-export async function scrapeHeroHobbies({ maxExpansions = 30, maxPagesPerExpansion = 5 } = {}) {
-  // 1) Load expansions list.
-  const allSetsUrl = `${BASE}/all-sets/`;
-  const resp = await fetchWithRetry(allSetsUrl, {}, { retries: 4 });
-
-  if (!resp.ok) {
-    return {
-      ok: false,
-      storeSlug: "herohobbies",
-      message: `Failed to fetch expansions list: ${resp.status}`,
-      listings: [],
-    };
-  }
-
-  const html = await resp.text();
-  const expansions = extractExpansionNames(html).slice(0, maxExpansions);
-
+export async function scrapeHeroHobbies({ maxPages = 40 } = {}) {
   const all = [];
-  for (const expansion of expansions) {
-    const firstUrl = `${BASE}/product-search/?expansion=${encodeURIComponent(expansion)}`;
-    const firstResp = await fetchWithRetry(firstUrl, {}, { retries: 4 });
-    if (!firstResp.ok) continue;
-    const firstHtml = await firstResp.text();
-    const lastPage = Math.min(
-      maxPagesPerExpansion,
-      Math.max(1, extractPaginationLastPage(firstHtml))
-    );
+  const seen = new Set();
+  let emptyPages = 0;
 
-    // page 1
-    all.push(...extractListingsFromSearchPage(firstHtml));
+  for (let page = 1; page <= maxPages; page++) {
+    const url = `${BASE}/mtg/page/${page}/`;
+    const resp = await fetchWithRetry(url, {}, { retries: 4, baseDelayMs: 1200 });
+    if (!resp.ok) break;
 
-    // additional pages (best-guess: &page=N)
-    for (let p = 2; p <= lastPage; p++) {
-      const url = `${firstUrl}&page=${p}`;
-      const r = await fetchWithRetry(url, {}, { retries: 4 });
-      if (!r.ok) break;
-      const h = await r.text();
-      all.push(...extractListingsFromSearchPage(h));
+    const html = await resp.text();
+    const rows = extractListingsFromShopPage(html, url);
+
+    let fresh = 0;
+    for (const row of rows) {
+      const key = `${row.productUrl}__${row.price}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      all.push(row);
+      fresh++;
     }
+
+    if (!rows.length || fresh === 0) {
+      emptyPages += 1;
+    } else {
+      emptyPages = 0;
+    }
+
+    if (emptyPages >= 2) break;
   }
 
   return {
     ok: true,
     storeSlug: "herohobbies",
-    message: `Scraped ${all.length} listing rows from ${expansions.length} expansions (maxPagesPerExpansion=${maxPagesPerExpansion}).`,
+    message: `Scraped ${all.length} listing rows from Hero Hobbies shop pages.`,
     listings: all,
-    meta: { expansions },
+    meta: { maxPages },
   };
 }
